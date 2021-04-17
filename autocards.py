@@ -1,63 +1,58 @@
 from pipelines import qg_pipeline
+from pipelines import FlashcardStyle
 from transformers import pipeline
-from bs4 import BeautifulSoup
-import csv
+from typing import List
+import nltk
+import re
 
+cloze_open_tag = "<span class='cloze'>"
+cloze_close_tag = "</span>"
+hl_tag = " <hl> "
+hl_regex = " <hl> (.+) <hl> "
 
 class Autocards:
+
     def __init__(self):
-        self.qg = qg_pipeline('question-generation', model='valhalla/t5-base-qg-hl', ans_model='valhalla/t5-small-qa-qg-hl')
-        self.qa_pairs = []
+        self.generate_cards = qg_pipeline('question-generation',
+                                          model='valhalla/t5-base-qg-hl',
+                                          ans_model='valhalla/t5-small-qa-qg-hl')
 
-    def consume_text(self, text, per_paragraph=False):
-        text = text.replace('\xad ', '')
+    def create_clozes(self, text: str):
+        text = self.preprocess_text(text)
+        cloze_contexts = self.generate_cards(text, FlashcardStyle.Cloze)
+        ret = []
+        for cloze_context in cloze_contexts:
+            sts = nltk.sent_tokenize(cloze_context)
+            cloze = next((st for st in sts if " <hl> " in st), None)
+            data = {}
+            data["answer"] = re.search(hl_regex, cloze).group(1)
+            data["question"] = re.sub(hl_regex, self.wrap_cloze("[...]"), cloze)
+            ret.append(data)
+        return ret
 
-        if per_paragraph:
-            for paragraph in text.split('\n\n'):
-                self.qa_pairs += self.qg(paragraph)
-        else:
-            text = text.replace('\n\n', '. ').replace('..', '.')
-            self.qa_pairs += self.qg(text)
+    @staticmethod
+    def wrap_cloze(text: str):
+        return cloze_open_tag + text + cloze_close_tag
 
-    def consume_text_file(self, filename):
-        self.consume_text(open(filename).read())
 
-    def consume_paper(self, filename):
-        soup = BeautifulSoup(open(filename), 'xml')
-        paragraphs = []
+    def create_qas(self, text: str):
+        text = self.preprocess_text(text)
+        return self.generate_cards(text, FlashcardStyle.QA)
 
-        for paragraph in soup.article.body.find_all('p'):
-            paragraph = ' '.join(paragraph.get_text().split())
-            if len(paragraph) > 40:
-                paragraphs += [paragraph]
+    def reformulate_cloze(self, cloze: str):
+        qg_str = "generate question: " + cloze
+        answer = re.search(hl_regex, cloze).group(1)
+        question = self.generate_cards._generate_questions([qg_str])
+        return {
+            "question": question,
+            "answer": answer
+        }
 
-        qa_pairs = []
-        for paragraph in paragraphs:
-            qa_pairs += self.qg(paragraph)
-
-        self.qa_pairs += qa_pairs
-
-    def clear(self):
-        self.qa_pairs = []
-
-    def print(self, prefix='', jeopardy=False):
-        if prefix != '':
-            prefix += ' '
-            
-        for qa_pair in self.qa_pairs:
-            if jeopardy:
-                print('\"' + prefix + qa_pair['answer'] + '\",\"' + qa_pair['question'] + '\"')
-            else:
-                print('\"' + prefix + qa_pair['question'] + '\",\"' + qa_pair['answer'] + '\"')
-
-    def export(self, filename, prefix='', jeopardy=False):
-        if prefix != '':
-            prefix += ' '
-
-        with open(filename, 'w', newline='') as file:
-            writer = csv.writer(file)
-            for qa_pair in self.qa_pairs:
-                if jeopardy:
-                    writer.writerow([prefix + qa_pair['answer'], qa_pair['question']])
-                else:
-                    writer.writerow([prefix + qa_pair['question'], qa_pair['answer']])
+    @staticmethod
+    def preprocess_text(text: str):
+        text = (text
+                .replace('\xad ', '')
+                .replace('\n\n', '. ')
+                .replace('\r\n\r\n', '. ')
+                .replace('..', '.'))
+        return re.sub(r'\[\d+\]', "", text)
